@@ -92,21 +92,25 @@ def get_driver():
         except Exception:
             _driver = None
 
-    # Import here so PyInstaller can find it via hidden imports
     from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
     import tempfile, pathlib
 
     options = Options()
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
     profile_dir = pathlib.Path(tempfile.gettempdir()) / "resender_chrome_profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     options.add_argument(f"--user-data-dir={str(profile_dir)}")
 
-    _driver = webdriver.Chrome(options=options)
+    service = Service(ChromeDriverManager().install())
+    _driver = webdriver.Chrome(service=service, options=options)
     _driver.implicitly_wait(5)
     return _driver
 
@@ -124,7 +128,7 @@ def open_page(url):
         get_driver().get(url)
         return True, ""
     except Exception as e:
-        return False, str(e)
+        return False, f"Could not open browser:\n{e}"
 
 def extract_last_response(url, timeout=30):
     from selenium.webdriver.common.by import By
@@ -132,7 +136,11 @@ def extract_last_response(url, timeout=30):
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException
 
-    driver = get_driver()
+    try:
+        driver = get_driver()
+    except Exception as e:
+        return "", f"Could not start browser:\n{e}"
+
     sel = _selectors_for(url)
     try:
         if sel:
@@ -143,25 +151,31 @@ def extract_last_response(url, timeout=30):
                 text = el.text.strip()
                 if text:
                     return text, ""
-            return "", "No assistant response found on the page."
+            return "", "No assistant response found. Make sure the AI has finished responding."
         else:
             time.sleep(2)
             blocks = driver.find_elements(By.CSS_SELECTOR, "p, div")
-            candidates = sorted([(len(b.text), b.text.strip()) for b in blocks if b.text.strip()], reverse=True)
-            return (candidates[0][1], "") if candidates else ("", "No text found.")
+            candidates = sorted(
+                [(len(b.text), b.text.strip()) for b in blocks if b.text.strip()],
+                reverse=True
+            )
+            return (candidates[0][1], "") if candidates else ("", "No text found on page.")
     except TimeoutException:
-        return "", f"Timed out after {timeout}s."
+        return "", f"Timed out after {timeout}s — is the AI still generating?"
     except Exception as e:
         return "", str(e)
 
 def send_and_submit(url, text, timeout=15):
-    """Paste text into Page 2 input and automatically click Send."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
-    driver = get_driver()
+    try:
+        driver = get_driver()
+    except Exception as e:
+        return False, f"Could not start browser:\n{e}"
+
     if _hostname(driver.current_url) != _hostname(url):
         ok, err = open_page(url)
         if not ok:
@@ -170,10 +184,9 @@ def send_and_submit(url, text, timeout=15):
 
     sel = _selectors_for(url)
     if not sel:
-        return False, "Site not supported — use Preview to copy manually."
+        return False, "This site is not supported yet. Use Preview to copy the text manually."
 
     try:
-        # Paste into input
         inp = WebDriverWait(driver, timeout).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, sel["input"]))
         )
@@ -181,16 +194,15 @@ def send_and_submit(url, text, timeout=15):
         inp.send_keys(Keys.CONTROL + "a")
         inp.send_keys(Keys.DELETE)
         inp.send_keys(text)
-        time.sleep(1)  # let the site register the input
+        time.sleep(1)
 
-        # Auto-click Send button
         btn = WebDriverWait(driver, timeout).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, sel["submit"]))
         )
         btn.click()
         return True, ""
     except Exception as e:
-        return False, str(e)
+        return False, f"Could not paste/send:\n{e}"
 
 def build_combined_prompt(instructions, response):
     parts = [p.strip() for p in [instructions, response] if p.strip()]
