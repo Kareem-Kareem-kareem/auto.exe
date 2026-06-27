@@ -355,47 +355,47 @@ class MainWindow(QMainWindow):
         self.log.append(f'<span style="color:{color}">{text}</span>')
 
         def _ensure_driver(self):
-        """Ensure we have a Chrome debug driver; launch if needed."""
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-        from selenium.common.exceptions import WebDriverException
-        import time
-
-        # Check if we already have a working driver
-        if self.driver is not None:
-            try:
-                _ = self.driver.current_url
-                return self.driver, None
-            except Exception:
-                self.driver = None
-
-        # Try to attach to existing debug Chrome
-        try:
-            options = Options()
-            options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
-            self.driver.implicitly_wait(5)
-            return self.driver, None
-        except WebDriverException:
-            # Not running; launch it
-            if not launch_debug_chrome():
-                return None, "Failed to launch Chrome. Please install Chrome and try again."
-            # Wait for Chrome to start
-            for attempt in range(10):
-                time.sleep(1)
+            """Ensure we have a Chrome debug driver; launch if needed."""
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.chrome.service import Service
+            from webdriver_manager.chrome import ChromeDriverManager
+            from selenium.common.exceptions import WebDriverException
+            import time
+    
+               # Check if we already have a working driver
+            if self.driver is not None:
                 try:
-                    options = Options()
-                    options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-                    service = Service(ChromeDriverManager().install())
-                    self.driver = webdriver.Chrome(service=service, options=options)
-                    self.driver.implicitly_wait(5)
-                    return self.driver, "Chrome launched. Please log in and click Yes."
-                except WebDriverException:
-                    continue
-            return None, "Chrome started but couldn't connect after 10 seconds."
+                    _ = self.driver.current_url
+                    return self.driver, None
+                except Exception:
+                    self.driver = None
+    
+            # Try to attach to existing debug Chrome
+            try:
+                options = Options()
+                options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=options)
+                self.driver.implicitly_wait(5)
+                return self.driver, None
+            except WebDriverException:
+                # Not running; launch it
+                if not launch_debug_chrome():
+                    return None, "Failed to launch Chrome. Please install Chrome and try again."
+                # Wait for Chrome to start
+                for attempt in range(10):
+                    time.sleep(1)
+                    try:
+                        options = Options()
+                        options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+                        service = Service(ChromeDriverManager().install())
+                        self.driver = webdriver.Chrome(service=service, options=options)
+                        self.driver.implicitly_wait(5)
+                        return self.driver, "Chrome launched. Please log in and click Yes."
+                    except WebDriverException:
+                        continue
+                return None, "Chrome started but couldn't connect after 10 seconds."
             
     def start_auto(self):
         page1 = self.url1.text().strip()
