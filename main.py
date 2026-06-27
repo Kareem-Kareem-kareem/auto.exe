@@ -354,7 +354,7 @@ class MainWindow(QMainWindow):
     def append_log(self, text, color="#eaeaea"):
         self.log.append(f'<span style="color:{color}">{text}</span>')
 
-        def _ensure_driver(self):
+     def _ensure_driver(self):
             """Ensure we have a Chrome debug driver; launch if needed."""
             from selenium import webdriver
             from selenium.webdriver.chrome.options import Options
