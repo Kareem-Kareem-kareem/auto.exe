@@ -3,6 +3,7 @@ import time
 import json
 import os
 import traceback
+import subprocess
 from urllib.parse import urlparse
 
 from PySide6.QtWidgets import (
@@ -36,7 +37,7 @@ def save_config(config):
         return False
 
 # ---------------------------------------------------------------------------
-# Browser automation
+# Browser automation with automatic debug launch
 # ---------------------------------------------------------------------------
 SITE_SELECTORS = {
     "chatgpt.com": {
@@ -67,6 +68,7 @@ SITE_SELECTORS = {
 }
 
 _driver = None
+_initialized = False
 
 def _hostname(url):
     try:
@@ -81,50 +83,86 @@ def _selectors_for(url):
             return sel
     return None
 
-def get_driver():
+def launch_debug_chrome():
+    """Launch Chrome with remote debugging enabled, return True if successful."""
+    chrome_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"chrome.exe",  # hope it's in PATH
+    ]
+    for path in chrome_paths:
+        try:
+            subprocess.Popen([path, "--remote-debugging-port=9222"], shell=False)
+            return True
+        except Exception:
+            continue
+    return False
+
+def ensure_debug_chrome():
+    """
+    Try to connect to existing debug Chrome.
+    If not possible, launch it and ask user to log in.
+    Returns (driver, message_to_user) where driver might be None if user cancels.
+    """
     global _driver
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.common.exceptions import WebDriverException
+
     if _driver is not None:
         try:
             _ = _driver.current_url
-            return _driver
+            return _driver, None
         except Exception:
             _driver = None
 
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
+    # Try to attach to an existing debug Chrome
+    try:
+        options = Options()
+        options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+        _driver = webdriver.Chrome(options=options)
+        _driver.implicitly_wait(5)
+        return _driver, None
+    except WebDriverException:
+        # No debug Chrome found, launch one
+        if not launch_debug_chrome():
+            return None, "Failed to launch Chrome. Please install Chrome and try again."
+        # Wait a moment for Chrome to start, then try to attach
+        time.sleep(3)
+        try:
+            options = Options()
+            options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+            _driver = webdriver.Chrome(options=options)
+            _driver.implicitly_wait(5)
+            # Return driver and a message telling user to log in
+            return _driver, "Chrome launched in debug mode. Please log in to your AI sites in that window, then click 'I'm Ready' below."
+        except WebDriverException as e:
+            return None, f"Chrome started but couldn't connect: {str(e)}"
 
-    # ★ ATTACH TO YOUR EXISTING CHROME WINDOW ★
-    options = Options()
-    options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+def get_driver():
+    """Ensure we have a debug Chrome attached; if not, ask user via a callback."""
+    # This function will be replaced by a class method that handles the UI prompt.
+    raise NotImplementedError("Use the MainWindow method to get driver.")
 
-    _driver = webdriver.Chrome(options=options)
-    _driver.implicitly_wait(5)
-    return _driver
-
-# ★★★★★ FIXED: This is the important change ★★★★★
-def open_page(url):
+# ---------------------------------------------------------------------------
+# Page operations (same as before with timeout fix)
+# ---------------------------------------------------------------------------
+def open_page(driver, url):
     from selenium.common.exceptions import TimeoutException
     try:
-        driver = get_driver()
-        driver.set_page_load_timeout(30)  # ★ Only wait 30 seconds
+        driver.set_page_load_timeout(30)
         driver.get(url)
         return True, ""
     except TimeoutException:
-        # ★ Page is still "loading" due to WebSockets, but we can proceed anyway
         return True, ""
     except Exception as e:
         return False, str(e)
 
-def extract_last_response(url, timeout=30):
+def extract_last_response(driver, url, timeout=30):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException
-
-    try:
-        driver = get_driver()
-    except Exception as e:
-        return "", str(e)
 
     sel = _selectors_for(url)
     try:
@@ -150,19 +188,14 @@ def extract_last_response(url, timeout=30):
     except Exception as e:
         return "", str(e)
 
-def send_and_submit(url, text, timeout=15):
+def send_and_submit(driver, url, text, timeout=15):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
-    try:
-        driver = get_driver()
-    except Exception as e:
-        return False, str(e)
-
     if _hostname(driver.current_url) != _hostname(url):
-        ok, err = open_page(url)
+        ok, err = open_page(driver, url)
         if not ok:
             return False, err
         time.sleep(3)
@@ -194,7 +227,7 @@ def build_combined_prompt(instructions, response):
     return "\n\n".join(parts)
 
 # ---------------------------------------------------------------------------
-# Worker thread for automation
+# Worker thread for automation (with driver passed in)
 # ---------------------------------------------------------------------------
 class AutoWorkerSignals(QObject):
     status = Signal(str)
@@ -203,23 +236,23 @@ class AutoWorkerSignals(QObject):
     finished = Signal()
 
 class AutoWorker(QThread):
-    def __init__(self, page1, page2, instructions):
+    def __init__(self, driver, page1, page2, instructions):
         super().__init__()
+        self.driver = driver
         self.page1 = page1
         self.page2 = page2
         self.instructions = instructions
-        self.signals = AutoWorkerSignals()  # ★ FIXED: was missing
+        self.signals = AutoWorkerSignals()
 
     def run(self):
         try:
-            self.signals.status.emit("Opening Page 1...")
-            ok, err = open_page(self.page1)
+            self.signals.status.emit("Navigating to Page 1...")
+            ok, err = open_page(self.driver, self.page1)
             if not ok:
                 self.signals.error.emit(f"Failed to open Page 1: {err}")
                 return
-            self.signals.status.emit("Page 1 loaded. Extracting response...")
-            
-            response1, err = extract_last_response(self.page1, timeout=40)
+            self.signals.status.emit("Extracting response from Page 1...")
+            response1, err = extract_last_response(self.driver, self.page1, timeout=40)
             if err:
                 self.signals.status.emit(f"Extraction note: {err}")
             if not response1:
@@ -232,21 +265,19 @@ class AutoWorker(QThread):
                 self.signals.error.emit("Combined prompt is empty.")
                 return
 
-            self.signals.status.emit("Opening Page 2...")
-            ok, err = open_page(self.page2)
+            self.signals.status.emit("Navigating to Page 2...")
+            ok, err = open_page(self.driver, self.page2)
             if not ok:
                 self.signals.error.emit(f"Failed to open Page 2: {err}")
                 return
-            self.signals.status.emit("Page 2 loaded. Sending prompt...")
-            
-            ok, err = send_and_submit(self.page2, combined)
+            self.signals.status.emit("Sending prompt to Page 2...")
+            ok, err = send_and_submit(self.driver, self.page2, combined)
             if not ok:
                 self.signals.error.emit(f"Failed to send: {err}")
                 return
-            self.signals.status.emit("Prompt sent. Waiting for Page 2 response...")
+            self.signals.status.emit("Waiting for Page 2 response...")
             time.sleep(5)
-            
-            response2, err = extract_last_response(self.page2, timeout=60)
+            response2, err = extract_last_response(self.driver, self.page2, timeout=60)
             if err:
                 self.signals.status.emit(f"Extraction note: {err}")
             if not response2:
@@ -258,7 +289,6 @@ class AutoWorker(QThread):
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
-            close_driver()
             self.signals.finished.emit()
 
 # ---------------------------------------------------------------------------
@@ -290,6 +320,7 @@ class MainWindow(QMainWindow):
         """)
 
         self.config = load_config()
+        self.driver = None
         self.build_ui()
         self.load_config_into_ui()
         self.worker = None
@@ -376,18 +407,75 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing URL", "Please fill in both Page 1 and Page 2 URLs.")
             return
 
+        # Try to get a debug Chrome driver, launching if needed
+        driver, user_msg = self._ensure_driver()
+        if driver is None:
+            if user_msg:
+                QMessageBox.critical(self, "Chrome Error", user_msg)
+            else:
+                QMessageBox.critical(self, "Chrome Error", "Failed to start Chrome debug mode.")
+            return
+        if user_msg:
+            # Ask user to log in and proceed
+            reply = QMessageBox.question(
+                self,
+                "Log In Required",
+                user_msg + "\n\nAfter logging in to both AI sites, click 'Yes' to continue.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                self.set_status("Canceled by user.", "#ff9800")
+                return
+
+        # Now we have a driver ready; run the automation
         self.btn_auto.setEnabled(False)
         self.btn_save.setEnabled(False)
         self.log.clear()
         self.append_log("🚀 Starting automated relay...", "#ff9800")
 
-        self.worker = AutoWorker(page1, page2, instr)
+        self.worker = AutoWorker(driver, page1, page2, instr)
         self.worker.signals.status.connect(lambda msg: self.set_status(msg, "#ff9800"))
         self.worker.signals.status.connect(lambda msg: self.append_log(f"⏳ {msg}", "#ff9800"))
         self.worker.signals.result.connect(self.on_result)
         self.worker.signals.error.connect(self.on_error)
         self.worker.signals.finished.connect(self.on_finished)
         self.worker.start()
+
+    def _ensure_driver(self):
+        """Ensure we have a Chrome debug driver; launch if needed."""
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.common.exceptions import WebDriverException
+
+        # Check if we already have a working driver
+        if self.driver is not None:
+            try:
+                _ = self.driver.current_url
+                return self.driver, None
+            except Exception:
+                self.driver = None
+
+        # Try to attach to existing debug Chrome
+        try:
+            options = Options()
+            options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+            self.driver = webdriver.Chrome(options=options)
+            self.driver.implicitly_wait(5)
+            return self.driver, None
+        except WebDriverException:
+            # Not running; launch it
+            if not launch_debug_chrome():
+                return None, "Failed to launch Chrome. Please install Chrome and try again."
+            time.sleep(3)
+            try:
+                options = Options()
+                options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+                self.driver = webdriver.Chrome(options=options)
+                self.driver.implicitly_wait(5)
+                return self.driver, "Chrome launched in debug mode. Please log in to your AI sites in that window, then click 'Yes'."
+            except WebDriverException as e:
+                return None, f"Chrome started but couldn't connect: {str(e)}"
 
     def on_result(self, text):
         self.append_log("\n" + "=" * 60 + "\n✅ RESPONSE FROM PAGE 2 AI:\n" + "=" * 60, "#4caf50")
@@ -406,7 +494,8 @@ class MainWindow(QMainWindow):
         self.btn_save.setEnabled(True)
 
     def closeEvent(self, event):
-        close_driver()
+        # Don't close the driver because we want to keep Chrome open for user.
+        # Optionally, you could close it, but for convenience we leave it.
         event.accept()
 
 # ---------------------------------------------------------------------------
