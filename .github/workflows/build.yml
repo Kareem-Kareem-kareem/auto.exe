@@ -23,19 +23,7 @@ jobs:
           pip install PySide6 selenium pyinstaller
 
       - name: Build exe
-        run: |
-          pyinstaller --onefile --windowed --name RESENDER ^
-            --hidden-import selenium ^
-            --hidden-import selenium.webdriver ^
-            --hidden-import selenium.webdriver.chrome ^
-            --hidden-import selenium.webdriver.chrome.options ^
-            --hidden-import selenium.webdriver.chrome.service ^
-            --hidden-import selenium.webdriver.common.by ^
-            --hidden-import selenium.webdriver.common.keys ^
-            --hidden-import selenium.webdriver.support.ui ^
-            --hidden-import selenium.webdriver.support.expected_conditions ^
-            --hidden-import selenium.common.exceptions ^
-            main.py
+        run: pyinstaller --onefile --windowed --name RESENDER --hidden-import selenium --hidden-import selenium.webdriver --hidden-import selenium.webdriver.chrome --hidden-import selenium.webdriver.chrome.options --hidden-import selenium.webdriver.chrome.service --hidden-import selenium.webdriver.common.by --hidden-import selenium.webdriver.common.keys --hidden-import selenium.webdriver.support.ui --hidden-import selenium.webdriver.support.expected_conditions --hidden-import selenium.common.exceptions main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
