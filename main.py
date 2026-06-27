@@ -36,7 +36,7 @@ def save_config(config):
         return False
 
 # ---------------------------------------------------------------------------
-# Browser automation (same as before)
+# Browser automation
 # ---------------------------------------------------------------------------
 SITE_SELECTORS = {
     "chatgpt.com": {
@@ -121,9 +121,16 @@ def close_driver():
             pass
         _driver = None
 
+# ★★★★★ FIXED: This is the important change ★★★★★
 def open_page(url):
+    from selenium.common.exceptions import TimeoutException
     try:
-        get_driver().get(url)
+        driver = get_driver()
+        driver.set_page_load_timeout(30)  # ★ Only wait 30 seconds
+        driver.get(url)
+        return True, ""
+    except TimeoutException:
+        # ★ Page is still "loading" due to WebSockets, but we can proceed anyway
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -211,7 +218,7 @@ def build_combined_prompt(instructions, response):
 # ---------------------------------------------------------------------------
 class AutoWorkerSignals(QObject):
     status = Signal(str)
-    result = Signal(str)   # Page 2 response
+    result = Signal(str)
     error  = Signal(str)
     finished = Signal()
 
@@ -221,8 +228,7 @@ class AutoWorker(QThread):
         self.page1 = page1
         self.page2 = page2
         self.instructions = instructions
-        # ★ FIXED: this line was missing! ★
-        self.signals = AutoWorkerSignals()
+        self.signals = AutoWorkerSignals()  # ★ FIXED: was missing
 
     def run(self):
         try:
@@ -231,7 +237,8 @@ class AutoWorker(QThread):
             if not ok:
                 self.signals.error.emit(f"Failed to open Page 1: {err}")
                 return
-            self.signals.status.emit("Extracting response from Page 1...")
+            self.signals.status.emit("Page 1 loaded. Extracting response...")
+            
             response1, err = extract_last_response(self.page1, timeout=40)
             if err:
                 self.signals.status.emit(f"Extraction note: {err}")
@@ -250,13 +257,15 @@ class AutoWorker(QThread):
             if not ok:
                 self.signals.error.emit(f"Failed to open Page 2: {err}")
                 return
-            self.signals.status.emit("Sending prompt to Page 2...")
+            self.signals.status.emit("Page 2 loaded. Sending prompt...")
+            
             ok, err = send_and_submit(self.page2, combined)
             if not ok:
                 self.signals.error.emit(f"Failed to send: {err}")
                 return
-            self.signals.status.emit("Waiting for Page 2 response...")
+            self.signals.status.emit("Prompt sent. Waiting for Page 2 response...")
             time.sleep(5)
+            
             response2, err = extract_last_response(self.page2, timeout=60)
             if err:
                 self.signals.status.emit(f"Extraction note: {err}")
@@ -273,7 +282,7 @@ class AutoWorker(QThread):
             self.signals.finished.emit()
 
 # ---------------------------------------------------------------------------
-# Main Window
+# Main Window (GUI)
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -311,34 +320,29 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(30, 24, 30, 20)
 
-        # Header
         title = QLabel("RESENDER — Auto AI Relay")
         title.setStyleSheet("color: #e94560; font-size: 22px; font-weight: 700; letter-spacing: 3px;")
         layout.addWidget(title)
         layout.addSpacing(10)
 
-        # Page 1
         layout.addWidget(QLabel("AI PAGE 1 (SOURCE)"))
         self.url1 = QLineEdit()
         self.url1.setPlaceholderText("https://chatgpt.com/...")
         layout.addWidget(self.url1)
         layout.addSpacing(6)
 
-        # Page 2
         layout.addWidget(QLabel("AI PAGE 2 (DESTINATION)"))
         self.url2 = QLineEdit()
         self.url2.setPlaceholderText("https://claude.ai/...")
         layout.addWidget(self.url2)
         layout.addSpacing(6)
 
-        # Instructions
         layout.addWidget(QLabel("INSTRUCTIONS (prepended to extracted response)"))
         self.instructions = QTextEdit()
         self.instructions.setPlaceholderText("e.g. Translate to French and summarise in 3 bullet points")
         self.instructions.setFixedHeight(80)
         layout.addWidget(self.instructions)
 
-        # Buttons
         btn_row = QHBoxLayout()
         self.btn_auto = QPushButton("▶  AUTO RUN  (full flow)")
         self.btn_auto.setObjectName("btn-primary")
@@ -348,18 +352,15 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_save)
         layout.addLayout(btn_row)
 
-        # Log / output area
         layout.addWidget(QLabel("Status Log & Page 2 Response:"))
         self.log = QTextEdit()
         self.log.setObjectName("log")
         self.log.setReadOnly(True)
         layout.addWidget(self.log)
 
-        # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
-        # Connect buttons
         self.btn_auto.clicked.connect(self.start_auto)
         self.btn_save.clicked.connect(self.save_config)
 
@@ -440,11 +441,9 @@ if __name__ == "__main__":
         window.show()
         sys.exit(app.exec())
     except Exception as e:
-        # Log any unhandled exception to file
         with open("error.log", "w") as f:
             traceback.print_exc(file=f)
         try:
-            from PySide6.QtWidgets import QMessageBox
             app = QApplication(sys.argv)
             QMessageBox.critical(None, "Fatal Error", f"An unexpected error occurred:\n{e}\n\nCheck error.log for details.")
         except:
