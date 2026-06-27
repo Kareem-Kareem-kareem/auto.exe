@@ -20,11 +20,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 selenium webdriver-manager pyinstaller
+          pip install selenium webdriver-manager pyinstaller
 
       - name: Build exe
         run: |
-          pyinstaller --onefile --windowed --name RESENDER `
+          pyinstaller --onefile --name RESENDER `
             --collect-all selenium `
             --collect-all webdriver_manager `
             --hidden-import selenium.webdriver.chrome.webdriver `
