@@ -406,14 +406,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing URL", "Please fill in both Page 1 and Page 2 URLs.")
             return
 
-        # Get driver (launch debug Chrome if needed)
-        driver, user_msg = self._ensure_driver()
-        if driver is None:
-            if user_msg:
-                QMessageBox.critical(self, "Chrome Error", user_msg)
-            else:
-                QMessageBox.critical(self, "Chrome Error", "Failed to start Chrome debug mode.")
-            return
+        try:
+    driver, user_msg = self._ensure_driver()
+except Exception as e:
+    self.append_log(f"❌ Crash while starting Chrome: {e}", "#e94560")
+    QMessageBox.critical(self, "Crash", f"Error:\n{e}\n\nCheck error.log for details.")
+    self.btn_auto.setEnabled(True)
+    self.btn_save.setEnabled(True)
+    return
+
+if driver is None:
+    if user_msg:
+        QMessageBox.critical(self, "Chrome Error", user_msg)
+    else:
+        QMessageBox.critical(self, "Chrome Error", "Failed to start Chrome debug mode.")
+    self.btn_auto.setEnabled(True)
+    self.btn_save.setEnabled(True)
+    return
         if user_msg:
             reply = QMessageBox.question(
                 self,
