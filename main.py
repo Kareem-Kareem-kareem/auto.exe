@@ -1,6 +1,8 @@
 import sys
 import time
 from urllib.parse import urlparse
+import json
+import os
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -9,15 +11,12 @@ from PySide6.QtWidgets import (
     QMessageBox, QApplication,
 )
 from PySide6.QtCore import QThread, Signal, QObject
-import json
-import os
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "config.json")
-
 DEFAULT_CONFIG = {"page1_url": "", "page2_url": "", "instructions": ""}
 
 def load_config():
@@ -40,17 +39,6 @@ def save_config(config):
 # ---------------------------------------------------------------------------
 # Browser automation
 # ---------------------------------------------------------------------------
-
-try:
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.keys import Keys
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.common.exceptions import WebDriverException, NoSuchElementException, TimeoutException
-    SELENIUM_AVAILABLE = True
-except ImportError:
-    SELENIUM_AVAILABLE = False
 
 SITE_SELECTORS = {
     "chatgpt.com": {
@@ -104,14 +92,20 @@ def get_driver():
         except Exception:
             _driver = None
 
+    # Import here so PyInstaller can find it via hidden imports
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
     import tempfile, pathlib
-    options = webdriver.ChromeOptions()
+
+    options = Options()
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     profile_dir = pathlib.Path(tempfile.gettempdir()) / "resender_chrome_profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     options.add_argument(f"--user-data-dir={str(profile_dir)}")
+
     _driver = webdriver.Chrome(options=options)
     _driver.implicitly_wait(5)
     return _driver
@@ -126,8 +120,6 @@ def close_driver():
         _driver = None
 
 def open_page(url):
-    if not SELENIUM_AVAILABLE:
-        return False, "Selenium is not installed."
     try:
         get_driver().get(url)
         return True, ""
@@ -135,8 +127,11 @@ def open_page(url):
         return False, str(e)
 
 def extract_last_response(url, timeout=30):
-    if not SELENIUM_AVAILABLE:
-        return "", "Selenium is not installed."
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+
     driver = get_driver()
     sel = _selectors_for(url)
     try:
@@ -159,19 +154,26 @@ def extract_last_response(url, timeout=30):
     except Exception as e:
         return "", str(e)
 
-def send_to_page(url, text, timeout=15):
-    if not SELENIUM_AVAILABLE:
-        return False, "Selenium is not installed."
+def send_and_submit(url, text, timeout=15):
+    """Paste text into Page 2 input and automatically click Send."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
     driver = get_driver()
     if _hostname(driver.current_url) != _hostname(url):
         ok, err = open_page(url)
         if not ok:
             return False, err
-        time.sleep(2)
+        time.sleep(3)
+
     sel = _selectors_for(url)
     if not sel:
         return False, "Site not supported — use Preview to copy manually."
+
     try:
+        # Paste into input
         inp = WebDriverWait(driver, timeout).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, sel["input"]))
         )
@@ -179,18 +181,10 @@ def send_to_page(url, text, timeout=15):
         inp.send_keys(Keys.CONTROL + "a")
         inp.send_keys(Keys.DELETE)
         inp.send_keys(text)
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+        time.sleep(1)  # let the site register the input
 
-def submit_on_page(url, timeout=10):
-    if not SELENIUM_AVAILABLE:
-        return False, "Selenium is not installed."
-    sel = _selectors_for(url)
-    if not sel:
-        return False, "Submit not supported for this site."
-    try:
-        btn = WebDriverWait(get_driver(), timeout).until(
+        # Auto-click Send button
+        btn = WebDriverWait(driver, timeout).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, sel["submit"]))
         )
         btn.click()
@@ -313,10 +307,10 @@ class BrowserWorker(QThread):
                     self.signals.finished.emit(text)
 
             elif self.task == "send":
-                self.signals.status.emit("Pasting prompt into AI Page 2…")
-                ok, err = send_to_page(self.kwargs["url"], self.kwargs["text"])
+                self.signals.status.emit("Sending to AI Page 2…")
+                ok, err = send_and_submit(self.kwargs["url"], self.kwargs["text"])
                 if ok:
-                    self.signals.status.emit("Prompt pasted — review in browser and press Send.")
+                    self.signals.status.emit("✓ Sent! AI Page 2 is now responding.")
                     self.signals.finished.emit(True)
                 else:
                     self.signals.error.emit(err)
@@ -348,7 +342,7 @@ class PreviewDialog(QDialog):
         self.editor.setMinimumHeight(320)
         layout.addWidget(self.editor)
 
-        note = QLabel("Edit if needed, then click Send to AI Page 2.")
+        note = QLabel("Edit if needed, then click Send — it will auto-submit to AI Page 2.")
         note.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
         layout.addWidget(note)
 
