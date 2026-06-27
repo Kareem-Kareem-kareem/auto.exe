@@ -221,6 +221,8 @@ class AutoWorker(QThread):
         self.page1 = page1
         self.page2 = page2
         self.instructions = instructions
+        # ★ FIXED: this line was missing! ★
+        self.signals = AutoWorkerSignals()
 
     def run(self):
         try:
@@ -441,7 +443,6 @@ if __name__ == "__main__":
         # Log any unhandled exception to file
         with open("error.log", "w") as f:
             traceback.print_exc(file=f)
-        # Also show message box if possible
         try:
             from PySide6.QtWidgets import QMessageBox
             app = QApplication(sys.argv)
