@@ -92,34 +92,14 @@ def get_driver():
 
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
-    import tempfile, pathlib
 
+    # ★ ATTACH TO YOUR EXISTING CHROME WINDOW ★
     options = Options()
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+    options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
 
-    profile_dir = pathlib.Path(tempfile.gettempdir()) / "resender_chrome_profile"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    options.add_argument(f"--user-data-dir={str(profile_dir)}")
-
-    service = Service(ChromeDriverManager().install())
-    _driver = webdriver.Chrome(service=service, options=options)
+    _driver = webdriver.Chrome(options=options)
     _driver.implicitly_wait(5)
     return _driver
-
-def close_driver():
-    global _driver
-    if _driver is not None:
-        try:
-            _driver.quit()
-        except Exception:
-            pass
-        _driver = None
 
 # ★★★★★ FIXED: This is the important change ★★★★★
 def open_page(url):
