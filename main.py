@@ -37,7 +37,7 @@ def save_config(config):
         return False
 
 # ---------------------------------------------------------------------------
-# Browser automation with automatic debug launch
+# Browser automation with automatic debug launch + webdriver_manager
 # ---------------------------------------------------------------------------
 SITE_SELECTORS = {
     "chatgpt.com": {
@@ -68,7 +68,6 @@ SITE_SELECTORS = {
 }
 
 _driver = None
-_initialized = False
 
 def _hostname(url):
     try:
@@ -84,11 +83,11 @@ def _selectors_for(url):
     return None
 
 def launch_debug_chrome():
-    """Launch Chrome with remote debugging enabled, return True if successful."""
+    """Launch Chrome with remote debugging enabled."""
     chrome_paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"chrome.exe",  # hope it's in PATH
+        "chrome.exe",
     ]
     for path in chrome_paths:
         try:
@@ -98,54 +97,8 @@ def launch_debug_chrome():
             continue
     return False
 
-def ensure_debug_chrome():
-    """
-    Try to connect to existing debug Chrome.
-    If not possible, launch it and ask user to log in.
-    Returns (driver, message_to_user) where driver might be None if user cancels.
-    """
-    global _driver
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.common.exceptions import WebDriverException
-
-    if _driver is not None:
-        try:
-            _ = _driver.current_url
-            return _driver, None
-        except Exception:
-            _driver = None
-
-    # Try to attach to an existing debug Chrome
-    try:
-        options = Options()
-        options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-        _driver = webdriver.Chrome(options=options)
-        _driver.implicitly_wait(5)
-        return _driver, None
-    except WebDriverException:
-        # No debug Chrome found, launch one
-        if not launch_debug_chrome():
-            return None, "Failed to launch Chrome. Please install Chrome and try again."
-        # Wait a moment for Chrome to start, then try to attach
-        time.sleep(3)
-        try:
-            options = Options()
-            options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-            _driver = webdriver.Chrome(options=options)
-            _driver.implicitly_wait(5)
-            # Return driver and a message telling user to log in
-            return _driver, "Chrome launched in debug mode. Please log in to your AI sites in that window, then click 'I'm Ready' below."
-        except WebDriverException as e:
-            return None, f"Chrome started but couldn't connect: {str(e)}"
-
-def get_driver():
-    """Ensure we have a debug Chrome attached; if not, ask user via a callback."""
-    # This function will be replaced by a class method that handles the UI prompt.
-    raise NotImplementedError("Use the MainWindow method to get driver.")
-
 # ---------------------------------------------------------------------------
-# Page operations (same as before with timeout fix)
+# Page operations (with timeout fix)
 # ---------------------------------------------------------------------------
 def open_page(driver, url):
     from selenium.common.exceptions import TimeoutException
@@ -227,7 +180,7 @@ def build_combined_prompt(instructions, response):
     return "\n\n".join(parts)
 
 # ---------------------------------------------------------------------------
-# Worker thread for automation (with driver passed in)
+# Worker thread for automation
 # ---------------------------------------------------------------------------
 class AutoWorkerSignals(QObject):
     status = Signal(str)
@@ -398,6 +351,45 @@ class MainWindow(QMainWindow):
     def append_log(self, text, color="#eaeaea"):
         self.log.append(f'<span style="color:{color}">{text}</span>')
 
+    def _ensure_driver(self):
+        """Ensure we have a Chrome debug driver; launch if needed."""
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        from selenium.common.exceptions import WebDriverException
+
+        # Check if we already have a working driver
+        if self.driver is not None:
+            try:
+                _ = self.driver.current_url
+                return self.driver, None
+            except Exception:
+                self.driver = None
+
+        # Try to attach to existing debug Chrome
+        try:
+            options = Options()
+            options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+            self.driver.implicitly_wait(5)
+            return self.driver, None
+        except WebDriverException:
+            # Not running; launch it
+            if not launch_debug_chrome():
+                return None, "Failed to launch Chrome. Please install Chrome and try again."
+            time.sleep(3)
+            try:
+                options = Options()
+                options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=options)
+                self.driver.implicitly_wait(5)
+                return self.driver, "Chrome launched in debug mode. Please log in to your AI sites in that window, then click 'Yes'."
+            except WebDriverException as e:
+                return None, f"Chrome started but couldn't connect: {str(e)}"
+
     def start_auto(self):
         page1 = self.url1.text().strip()
         page2 = self.url2.text().strip()
@@ -407,7 +399,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing URL", "Please fill in both Page 1 and Page 2 URLs.")
             return
 
-        # Try to get a debug Chrome driver, launching if needed
+        # Get driver (launch debug Chrome if needed)
         driver, user_msg = self._ensure_driver()
         if driver is None:
             if user_msg:
@@ -416,7 +408,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Chrome Error", "Failed to start Chrome debug mode.")
             return
         if user_msg:
-            # Ask user to log in and proceed
             reply = QMessageBox.question(
                 self,
                 "Log In Required",
@@ -442,41 +433,6 @@ class MainWindow(QMainWindow):
         self.worker.signals.finished.connect(self.on_finished)
         self.worker.start()
 
-    def _ensure_driver(self):
-        """Ensure we have a Chrome debug driver; launch if needed."""
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.common.exceptions import WebDriverException
-
-        # Check if we already have a working driver
-        if self.driver is not None:
-            try:
-                _ = self.driver.current_url
-                return self.driver, None
-            except Exception:
-                self.driver = None
-
-        # Try to attach to existing debug Chrome
-        try:
-            options = Options()
-            options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-            self.driver = webdriver.Chrome(options=options)
-            self.driver.implicitly_wait(5)
-            return self.driver, None
-        except WebDriverException:
-            # Not running; launch it
-            if not launch_debug_chrome():
-                return None, "Failed to launch Chrome. Please install Chrome and try again."
-            time.sleep(3)
-            try:
-                options = Options()
-                options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-                self.driver = webdriver.Chrome(options=options)
-                self.driver.implicitly_wait(5)
-                return self.driver, "Chrome launched in debug mode. Please log in to your AI sites in that window, then click 'Yes'."
-            except WebDriverException as e:
-                return None, f"Chrome started but couldn't connect: {str(e)}"
-
     def on_result(self, text):
         self.append_log("\n" + "=" * 60 + "\n✅ RESPONSE FROM PAGE 2 AI:\n" + "=" * 60, "#4caf50")
         self.append_log(text, "#eaeaea")
@@ -494,8 +450,7 @@ class MainWindow(QMainWindow):
         self.btn_save.setEnabled(True)
 
     def closeEvent(self, event):
-        # Don't close the driver because we want to keep Chrome open for user.
-        # Optionally, you could close it, but for convenience we leave it.
+        # Keep Chrome open for next runs
         event.accept()
 
 # ---------------------------------------------------------------------------
@@ -512,6 +467,7 @@ if __name__ == "__main__":
     except Exception as e:
         with open("error.log", "w") as f:
             traceback.print_exc(file=f)
+        # Show a message box with the error
         try:
             app = QApplication(sys.argv)
             QMessageBox.critical(None, "Fatal Error", f"An unexpected error occurred:\n{e}\n\nCheck error.log for details.")
