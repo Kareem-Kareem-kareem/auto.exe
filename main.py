@@ -2,7 +2,15 @@ import sys
 import time
 import json
 import os
+import traceback
 from urllib.parse import urlparse
+
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QTextEdit, QPushButton,
+    QStatusBar, QMessageBox, QApplication,
+)
+from PySide6.QtCore import QThread, Signal, QObject
 
 # ---------------------------------------------------------------------------
 # Config
@@ -19,8 +27,16 @@ def load_config():
             pass
     return DEFAULT_CONFIG.copy()
 
+def save_config(config):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
 # ---------------------------------------------------------------------------
-# Browser automation (from original script, stripped of GUI)
+# Browser automation (same as before)
 # ---------------------------------------------------------------------------
 SITE_SELECTORS = {
     "chatgpt.com": {
@@ -110,7 +126,7 @@ def open_page(url):
         get_driver().get(url)
         return True, ""
     except Exception as e:
-        return False, f"Could not open browser:\n{e}"
+        return False, str(e)
 
 def extract_last_response(url, timeout=30):
     from selenium.webdriver.common.by import By
@@ -121,7 +137,7 @@ def extract_last_response(url, timeout=30):
     try:
         driver = get_driver()
     except Exception as e:
-        return "", f"Could not start browser:\n{e}"
+        return "", str(e)
 
     sel = _selectors_for(url)
     try:
@@ -133,7 +149,7 @@ def extract_last_response(url, timeout=30):
                 text = el.text.strip()
                 if text:
                     return text, ""
-            return "", "No assistant response found. Make sure the AI has finished responding."
+            return "", "No assistant response found."
         else:
             time.sleep(2)
             blocks = driver.find_elements(By.CSS_SELECTOR, "p, div")
@@ -141,9 +157,9 @@ def extract_last_response(url, timeout=30):
                 [(len(b.text), b.text.strip()) for b in blocks if b.text.strip()],
                 reverse=True
             )
-            return (candidates[0][1], "") if candidates else ("", "No text found on page.")
+            return (candidates[0][1], "") if candidates else ("", "No text found.")
     except TimeoutException:
-        return "", f"Timed out after {timeout}s — is the AI still generating?"
+        return "", f"Timed out after {timeout}s."
     except Exception as e:
         return "", str(e)
 
@@ -156,7 +172,7 @@ def send_and_submit(url, text, timeout=15):
     try:
         driver = get_driver()
     except Exception as e:
-        return False, f"Could not start browser:\n{e}"
+        return False, str(e)
 
     if _hostname(driver.current_url) != _hostname(url):
         ok, err = open_page(url)
@@ -166,7 +182,7 @@ def send_and_submit(url, text, timeout=15):
 
     sel = _selectors_for(url)
     if not sel:
-        return False, "This site is not supported yet. Use Preview to copy the text manually."
+        return False, "Site not supported."
 
     try:
         inp = WebDriverWait(driver, timeout).until(
@@ -184,99 +200,252 @@ def send_and_submit(url, text, timeout=15):
         btn.click()
         return True, ""
     except Exception as e:
-        return False, f"Could not paste/send:\n{e}"
+        return False, str(e)
 
 def build_combined_prompt(instructions, response):
     parts = [p.strip() for p in [instructions, response] if p.strip()]
     return "\n\n".join(parts)
 
 # ---------------------------------------------------------------------------
-# Main automation flow
+# Worker thread for automation
 # ---------------------------------------------------------------------------
-def main():
-    config = load_config()
-    page1 = config.get("page1_url", "").strip()
-    page2 = config.get("page2_url", "").strip()
-    instructions = config.get("instructions", "").strip()
+class AutoWorkerSignals(QObject):
+    status = Signal(str)
+    result = Signal(str)   # Page 2 response
+    error  = Signal(str)
+    finished = Signal()
 
-    if not page1 or not page2:
-        print("ERROR: Please set page1_url and page2_url in config.json")
-        sys.exit(1)
+class AutoWorker(QThread):
+    def __init__(self, page1, page2, instructions):
+        super().__init__()
+        self.page1 = page1
+        self.page2 = page2
+        self.instructions = instructions
 
-    print("=" * 60)
-    print("RESENDER - Automated AI-to-AI relay")
-    print("=" * 60)
+    def run(self):
+        try:
+            self.signals.status.emit("Opening Page 1...")
+            ok, err = open_page(self.page1)
+            if not ok:
+                self.signals.error.emit(f"Failed to open Page 1: {err}")
+                return
+            self.signals.status.emit("Extracting response from Page 1...")
+            response1, err = extract_last_response(self.page1, timeout=40)
+            if err:
+                self.signals.status.emit(f"Extraction note: {err}")
+            if not response1:
+                self.signals.error.emit("No response extracted from Page 1.")
+                return
+            self.signals.status.emit(f"Extracted {len(response1)} chars.")
 
-    # Step 1: Open Page 1 and extract response
-    print(f"\n[1] Opening Page 1: {page1}")
-    ok, err = open_page(page1)
-    if not ok:
-        print(f"FAILED: {err}")
-        sys.exit(1)
-    print("   ✓ Page 1 loaded.")
+            combined = build_combined_prompt(self.instructions, response1)
+            if not combined:
+                self.signals.error.emit("Combined prompt is empty.")
+                return
 
-    print("[2] Extracting last AI response from Page 1...")
-    response1, err = extract_last_response(page1, timeout=40)
-    if err:
-        print(f"   ⚠️  Extraction note: {err}")
-    if not response1:
-        print("   ❌ No response extracted. Make sure the AI has replied.")
-        sys.exit(1)
-    print(f"   ✓ Extracted {len(response1)} characters.")
+            self.signals.status.emit("Opening Page 2...")
+            ok, err = open_page(self.page2)
+            if not ok:
+                self.signals.error.emit(f"Failed to open Page 2: {err}")
+                return
+            self.signals.status.emit("Sending prompt to Page 2...")
+            ok, err = send_and_submit(self.page2, combined)
+            if not ok:
+                self.signals.error.emit(f"Failed to send: {err}")
+                return
+            self.signals.status.emit("Waiting for Page 2 response...")
+            time.sleep(5)
+            response2, err = extract_last_response(self.page2, timeout=60)
+            if err:
+                self.signals.status.emit(f"Extraction note: {err}")
+            if not response2:
+                self.signals.error.emit("No response from Page 2.")
+                return
 
-    # Step 2: Build combined prompt
-    combined = build_combined_prompt(instructions, response1)
-    if not combined:
-        print("   ❌ Combined prompt is empty.")
-        sys.exit(1)
+            self.signals.result.emit(response2)
+            self.signals.status.emit("Done!")
+        except Exception as e:
+            self.signals.error.emit(str(e))
+        finally:
+            close_driver()
+            self.signals.finished.emit()
 
-    # Step 3: Open Page 2 and send combined prompt
-    print(f"\n[3] Opening Page 2: {page2}")
-    ok, err = open_page(page2)
-    if not ok:
-        print(f"FAILED: {err}")
-        sys.exit(1)
-    print("   ✓ Page 2 loaded.")
+# ---------------------------------------------------------------------------
+# Main Window
+# ---------------------------------------------------------------------------
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("RESENDER Auto")
+        self.setMinimumSize(700, 600)
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background-color: #1a1a2e; color: #eaeaea; font-family: Segoe UI, sans-serif; }
+            QLabel { color: #888aaa; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
+            QLineEdit, QTextEdit {
+                background-color: #0d1b2a; border: 1px solid #2a3a5a; border-radius: 6px;
+                padding: 8px; color: #eaeaea;
+            }
+            QLineEdit:focus, QTextEdit:focus { border: 1px solid #e94560; }
+            QPushButton {
+                background-color: #0f3460; color: #eaeaea; border: 1px solid #2a3a5a;
+                border-radius: 6px; padding: 9px 22px; font-weight: 600;
+            }
+            QPushButton:hover { background-color: #e94560; border-color: #e94560; }
+            QPushButton:disabled { background-color: #2a2a3e; color: #888aaa; }
+            QPushButton#btn-primary { background-color: #e94560; border-color: #e94560; }
+            QPushButton#btn-primary:hover { background-color: #ff6b81; }
+            QStatusBar { background-color: #16213e; color: #888aaa; border-top: 1px solid #2a3a5a; }
+            QTextEdit#log { font-size: 12px; font-family: monospace; background-color: #0d1b2a; }
+        """)
 
-    print("[4] Sending combined prompt to Page 2...")
-    ok, err = send_and_submit(page2, combined)
-    if not ok:
-        print(f"FAILED: {err}")
-        sys.exit(1)
-    print("   ✓ Prompt sent. Waiting for Page 2 AI to respond...")
+        self.config = load_config()
+        self.build_ui()
+        self.load_config_into_ui()
+        self.worker = None
 
-    # Step 4: Wait for Page 2 response and extract it
-    # Give the AI some time to start generating, then extract
-    time.sleep(5)  # initial buffer
-    print("[5] Extracting response from Page 2 AI...")
-    response2, err = extract_last_response(page2, timeout=60)
-    if err:
-        print(f"   ⚠️  Extraction note: {err}")
-    if not response2:
-        print("   ❌ No response received from Page 2 AI within timeout.")
-        sys.exit(1)
+    def build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(30, 24, 30, 20)
 
-    # Step 5: Output the result
-    print("\n" + "=" * 60)
-    print("✅ Page 2 AI RESPONSE:")
-    print("=" * 60)
-    print(response2)
-    print("\n" + "=" * 60)
+        # Header
+        title = QLabel("RESENDER — Auto AI Relay")
+        title.setStyleSheet("color: #e94560; font-size: 22px; font-weight: 700; letter-spacing: 3px;")
+        layout.addWidget(title)
+        layout.addSpacing(10)
 
-    # Close browser
-    close_driver()
-    print("\nDone. Browser closed.")
+        # Page 1
+        layout.addWidget(QLabel("AI PAGE 1 (SOURCE)"))
+        self.url1 = QLineEdit()
+        self.url1.setPlaceholderText("https://chatgpt.com/...")
+        layout.addWidget(self.url1)
+        layout.addSpacing(6)
 
+        # Page 2
+        layout.addWidget(QLabel("AI PAGE 2 (DESTINATION)"))
+        self.url2 = QLineEdit()
+        self.url2.setPlaceholderText("https://claude.ai/...")
+        layout.addWidget(self.url2)
+        layout.addSpacing(6)
+
+        # Instructions
+        layout.addWidget(QLabel("INSTRUCTIONS (prepended to extracted response)"))
+        self.instructions = QTextEdit()
+        self.instructions.setPlaceholderText("e.g. Translate to French and summarise in 3 bullet points")
+        self.instructions.setFixedHeight(80)
+        layout.addWidget(self.instructions)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self.btn_auto = QPushButton("▶  AUTO RUN  (full flow)")
+        self.btn_auto.setObjectName("btn-primary")
+        self.btn_save = QPushButton("Save Config")
+        btn_row.addWidget(self.btn_auto)
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_save)
+        layout.addLayout(btn_row)
+
+        # Log / output area
+        layout.addWidget(QLabel("Status Log & Page 2 Response:"))
+        self.log = QTextEdit()
+        self.log.setObjectName("log")
+        self.log.setReadOnly(True)
+        layout.addWidget(self.log)
+
+        # Status bar
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        # Connect buttons
+        self.btn_auto.clicked.connect(self.start_auto)
+        self.btn_save.clicked.connect(self.save_config)
+
+    def load_config_into_ui(self):
+        self.url1.setText(self.config.get("page1_url", ""))
+        self.url2.setText(self.config.get("page2_url", ""))
+        self.instructions.setPlainText(self.config.get("instructions", ""))
+
+    def save_config(self):
+        cfg = {
+            "page1_url": self.url1.text().strip(),
+            "page2_url": self.url2.text().strip(),
+            "instructions": self.instructions.toPlainText().strip(),
+        }
+        if save_config(cfg):
+            self.set_status("Configuration saved.", "#4caf50")
+        else:
+            self.set_status("Failed to save config.", "#e94560")
+
+    def set_status(self, msg, color="#888aaa"):
+        self.status_bar.setStyleSheet(f"QStatusBar {{ color: {color}; background-color: #16213e; }}")
+        self.status_bar.showMessage(msg)
+
+    def append_log(self, text, color="#eaeaea"):
+        self.log.append(f'<span style="color:{color}">{text}</span>')
+
+    def start_auto(self):
+        page1 = self.url1.text().strip()
+        page2 = self.url2.text().strip()
+        instr = self.instructions.toPlainText().strip()
+
+        if not page1 or not page2:
+            QMessageBox.warning(self, "Missing URL", "Please fill in both Page 1 and Page 2 URLs.")
+            return
+
+        self.btn_auto.setEnabled(False)
+        self.btn_save.setEnabled(False)
+        self.log.clear()
+        self.append_log("🚀 Starting automated relay...", "#ff9800")
+
+        self.worker = AutoWorker(page1, page2, instr)
+        self.worker.signals.status.connect(lambda msg: self.set_status(msg, "#ff9800"))
+        self.worker.signals.status.connect(lambda msg: self.append_log(f"⏳ {msg}", "#ff9800"))
+        self.worker.signals.result.connect(self.on_result)
+        self.worker.signals.error.connect(self.on_error)
+        self.worker.signals.finished.connect(self.on_finished)
+        self.worker.start()
+
+    def on_result(self, text):
+        self.append_log("\n" + "=" * 60 + "\n✅ RESPONSE FROM PAGE 2 AI:\n" + "=" * 60, "#4caf50")
+        self.append_log(text, "#eaeaea")
+        self.append_log("=" * 60 + "\n", "#888aaa")
+        self.set_status("✅ Done! Response from Page 2 shown above.", "#4caf50")
+        QMessageBox.information(self, "Success", "Page 2 responded! Check the log area.")
+
+    def on_error(self, msg):
+        self.append_log(f"❌ ERROR: {msg}", "#e94560")
+        self.set_status(f"Error: {msg}", "#e94560")
+        QMessageBox.critical(self, "Error", msg)
+
+    def on_finished(self):
+        self.btn_auto.setEnabled(True)
+        self.btn_save.setEnabled(True)
+
+    def closeEvent(self, event):
+        close_driver()
+        event.accept()
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        main()
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-        close_driver()
-        sys.exit(1)
+        app = QApplication(sys.argv)
+        app.setApplicationName("RESENDER Auto")
+        app.setStyle("Fusion")
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())
     except Exception as e:
-        print(f"\n❌ UNEXPECTED ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        close_driver()
-        sys.exit(1)
+        # Log any unhandled exception to file
+        with open("error.log", "w") as f:
+            traceback.print_exc(file=f)
+        # Also show message box if possible
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            app = QApplication(sys.argv)
+            QMessageBox.critical(None, "Fatal Error", f"An unexpected error occurred:\n{e}\n\nCheck error.log for details.")
+        except:
+            pass
+        raise
